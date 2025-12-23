@@ -86,29 +86,53 @@ def start_process(name: str, extra_env: dict = None):
     pid_path(name).write_text(str(pid))
     # Give it a moment to start
     time.sleep(0.5)
-    return True, f"✅ Started {name} (pid={pid})"
+    return True, f"Started {name} (pid={pid})"
 
 
 def stop_process(name: str):
     pid = read_pid(name)
     if not pid:
         return False, f"{name} not running"
+    # Helper to confirm the PID belongs to the expected script to avoid PID reuse false positives
+    def _is_expected_process(pid_check: int, proc_name: str) -> bool:
+        try:
+            os.kill(pid_check, 0)
+        except Exception:
+            return False
+        try:
+            with open(f"/proc/{pid_check}/cmdline", "rb") as f:
+                cmd = f.read().decode(errors="ignore")
+            expected = str(APP_DIR / f"{proc_name}.py")
+            return expected in cmd
+        except Exception:
+            # If we cannot read cmdline, fall back to assuming it's still running
+            return True
     try:
         os.kill(pid, signal.SIGINT)
     except Exception:
         pass
     # wait briefly for graceful shutdown
     for _ in range(30):
-        if not is_running(pid):
+        if not _is_expected_process(pid, name):
             break
         time.sleep(0.1)
-    if is_running(pid):
+    if _is_expected_process(pid, name):
         try:
             os.kill(pid, signal.SIGTERM)
         except Exception:
             pass
     # final check
-    if is_running(pid):
+    if _is_expected_process(pid, name):
+        # If PID exists but now belongs to a different process, treat as stopped
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as f:
+                cmd = f.read().decode(errors="ignore")
+            expected = str(APP_DIR / f"{name}.py")
+            if expected not in cmd:
+                pid_path(name).unlink(missing_ok=True)
+                return True, f"stopped {name}"
+        except Exception:
+            pass
         return False, f"failed to stop {name} (pid={pid})"
     pid_path(name).unlink(missing_ok=True)
     return True, f"stopped {name}"
@@ -149,22 +173,10 @@ body {background-color: #0b1020}
 .small {font-size:12px; color:#9aa3b2}
 </style>
 <div class="title">Traffic Stream Controller</div>
-<div class="subtitle">Real-time demo: control producer & consumer, view KPI strip and AI decisions</div>
+<div class="subtitle">Real-time control of producer and consumer with clear KPIs and AI decisions</div>
 """, unsafe_allow_html=True)
 
-# GEMINI key status badge
-gemini_key = None
-try:
-    from dotenv import dotenv_values
-    cfg = dotenv_values(APP_DIR / '.env')
-    gemini_key = cfg.get('GEMINI_API_KEY') if cfg else None
-except Exception:
-    gemini_key = os.getenv('GEMINI_API_KEY')
-
-if gemini_key:
-    st.markdown(f"<div style='margin-top:8px'><span class='chip green'>Gemini key loaded</span></div>", unsafe_allow_html=True)
-else:
-    st.markdown(f"<div style='margin-top:8px'><span class='chip red'>Gemini key missing</span> <span class='small'>set GEMINI_API_KEY in .env</span></div>", unsafe_allow_html=True)
+# Removed Gemini key badge for a cleaner, professional UI
 
 # Auto-refresh mechanism - use Streamlit's built-in auto-refresh if available
 try:
@@ -182,11 +194,11 @@ except:
 # Manual refresh button (always visible)
 col1, col2 = st.columns([1, 4])
 with col1:
-    if st.button("🔄 Refresh Now", use_container_width=True):
+    if st.button("Refresh", use_container_width=True):
         st.session_state.auto_refresh_count = 0
         st.rerun()
 with col2:
-    st.caption("Auto-refreshing every ~3 seconds...")
+    st.caption("Automatically refreshes every 3 seconds.")
 
 
 def ensure_db_schema(conn: sqlite3.Connection):
@@ -347,7 +359,7 @@ with cols[0]:
         else:
             st.error(msg)
 
-    st.subheader("📊 Producer Status & Logs")
+    st.subheader("Producer Status & Logs")
     producer_log = tail_log('producer', 50)
     if producer_log and producer_log != "(no log yet)":
         st.markdown(f"<div class='logbox' style='max-height:300px; overflow-y:auto;'>{producer_log.replace('\n','<br>')}</div>", unsafe_allow_html=True)
@@ -370,7 +382,7 @@ with cols[1]:
     csv_enabled = st.checkbox("CSV logging enabled", value=(os.getenv('CSV_LOG_ENABLED', '1') != '0'))
     
     if not use_real_gemini:
-        st.info("ℹ️ Using mock/hardcoded responses (no API costs). Enable checkbox above to use real Gemini API.")
+        st.info("Using mock/hardcoded responses (no API costs). Enable the option above to use the real Gemini API.")
 
     if st.button("Start Consumer"):
         write_env({
@@ -395,7 +407,7 @@ with cols[1]:
         else:
             st.error(msg)
 
-    st.subheader("📊 Consumer Status & Logs")
+    st.subheader("Consumer Status & Logs")
     consumer_log = tail_log('consumer', 50)
     if consumer_log and consumer_log != "(no log yet)":
         # color important messages
@@ -412,19 +424,19 @@ with cols[1]:
 st.markdown("---")
 
 # Real-time status summary
-st.subheader("🔄 System Status")
+st.subheader("System Status")
 status_cols = st.columns(4)
 
 with status_cols[0]:
     producer_pid = read_pid('producer')
     producer_running = bool(producer_pid and is_running(producer_pid))
-    st.metric("Producer", "🟢 Running" if producer_running else "🔴 Stopped", 
+    st.metric("Producer", "Running" if producer_running else "Stopped", 
               f"PID: {producer_pid}" if producer_pid else "No PID")
 
 with status_cols[1]:
     consumer_pid = read_pid('consumer')
     consumer_running = bool(consumer_pid and is_running(consumer_pid))
-    st.metric("Consumer", "🟢 Running" if consumer_running else "🔴 Stopped",
+    st.metric("Consumer", "Running" if consumer_running else "Stopped",
               f"PID: {consumer_pid}" if consumer_pid else "No PID")
 
 with status_cols[2]:
@@ -433,9 +445,9 @@ with status_cols[2]:
         from kafka import KafkaProducer
         test_prod = KafkaProducer(bootstrap_servers='localhost:9092', request_timeout_ms=2000)
         test_prod.close()
-        kafka_status = "🟢 Connected"
+        kafka_status = "Connected"
     except:
-        kafka_status = "🔴 Disconnected"
+        kafka_status = "Disconnected"
     st.metric("Kafka", kafka_status, "localhost:9092")
 
 with status_cols[3]:
@@ -446,9 +458,9 @@ with status_cols[3]:
         cur.execute("SELECT COUNT(*) FROM traffic_events")
         event_count = cur.fetchone()[0]
         test_conn.close()
-        db_status = f"🟢 {event_count} events"
+        db_status = f"{event_count} events"
     except:
-        db_status = "🔴 Error"
+        db_status = "Error"
     st.metric("Database", db_status, "traffic_events.db")
 
 # --------------------
@@ -461,13 +473,13 @@ kpi_cols = st.columns([1,1,1,1,1])
 with kpi_cols[0]:
     st.metric(label="Events/sec", value=f"{kpis['events_per_sec']:.2f}")
 with kpi_cols[1]:
-    st.metric(label="🔥 High Congestion", value=kpis['high'])
+    st.metric(label="High Congestion", value=kpis['high'])
 with kpi_cols[2]:
-    st.metric(label="🟡 Medium", value=kpis['medium'])
+    st.metric(label="Medium", value=kpis['medium'])
 with kpi_cols[3]:
-    st.metric(label="🟢 Low", value=kpis['low'])
+    st.metric(label="Low", value=kpis['low'])
 with kpi_cols[4]:
-    st.metric(label="🧠 AI Calls", value=kpis['ai_calls'])
+    st.metric(label="AI Calls", value=kpis['ai_calls'])
 
 # --------------------
 # Layer 2: Live Classification Timeline
